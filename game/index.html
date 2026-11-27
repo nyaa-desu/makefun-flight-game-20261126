@@ -1,27 +1,35 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Skyhook Run — a flight game</title>
-<style>
-  html, body {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    background: #10141e;
-    overflow: hidden;
-  }
-  #game {
-    display: block;
-    width: 100vw;
-    height: 100vh;
-    cursor: crosshair;
-  }
-</style>
-</head>
-<body>
-<canvas id="game"></canvas>
-<script type="module" src="./src/main.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skyhook Run: fly the Kestrel through a river valley at dusk — 3 missions, 29 rings, gusting crosswind, fuel top-ups, stall model</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #141428;
+      }
+      #game {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: crosshair;
+      }
+      noscript {
+        color: #fff4d6;
+        font: 16px sans-serif;
+        padding: 24px;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <noscript>Skyhook Run needs JavaScript to fly.</noscript>
+    <script type="module" src="./src/main.js"></script>
+  </body>
 </html>
