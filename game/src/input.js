@@ -1,101 +1,77 @@
-// Skyhook Run — keyboard and mouse: arrows or WASD fly the plane,
-// Shift and Ctrl work the throttle, the mouse steers when it moves,
-// and the rest of the keys run the menus.
+// Keyboard and mouse: arrows or WASD to steer, Shift/Ctrl for throttle,
+// F for flaps, C for the camera, M to mute, P to pause, R to restart,
+// 1/2/3 to pick a mission. The mouse steers too — move it and the
+// Kestrel follows. All state lives in one object the loop reads.
 
 export function createInput(canvas) {
   const keys = new Set();
-  const input = {
-    keys,
-    // Mouse steering: -1..1 off centre, 0 when the mouse is still.
-    mouseX: 0,
-    mouseY: 0,
-    mouseActive: false,
-    mouseDown: false,
-    // Last mouse position in canvas pixels, for menu hover.
-    mousePx: 0,
-    mousePy: 0,
-    // Click position for menu buttons, consumed by the game loop.
-    click: null,
-    // The last key pressed, consumed by the game loop.
-    pressed: null,
-  };
+  const mouse = { x: 0.5, y: 0.5, active: false, inside: false };
 
-  window.addEventListener('keydown', (event) => {
-    const code = event.code;
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code)) {
-      event.preventDefault();
+  function code(e) {
+    return e.code || e.key;
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code(e))) {
+      e.preventDefault();
     }
-    if (!event.repeat) input.pressed = code;
-    keys.add(code);
+    keys.add(code(e));
   });
-  window.addEventListener('keyup', (event) => {
-    keys.delete(event.code);
-  });
-  window.addEventListener('blur', () => {
-    keys.clear();
-    input.mouseActive = false;
-  });
+  window.addEventListener('keyup', (e) => keys.delete(code(e)));
+  window.addEventListener('blur', () => keys.clear());
 
-  canvas.addEventListener('mousemove', (event) => {
+  canvas.addEventListener('pointermove', (e) => {
     const rect = canvas.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    input.mouseX = Math.max(-1, Math.min(1, (event.clientX - cx) / (rect.width / 2)));
-    input.mouseY = Math.max(-1, Math.min(1, (event.clientY - cy) / (rect.height / 2)));
-    input.mousePx = event.clientX - rect.left;
-    input.mousePy = event.clientY - rect.top;
-    input.mouseActive = true;
+    mouse.x = (e.clientX - rect.left) / Math.max(1, rect.width);
+    mouse.y = (e.clientY - rect.top) / Math.max(1, rect.height);
+    mouse.active = true;
+    mouse.inside = true;
   });
-  canvas.addEventListener('mousedown', (event) => {
-    input.mouseDown = true;
-    const rect = canvas.getBoundingClientRect();
-    input.click = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  canvas.addEventListener('pointerleave', () => {
+    mouse.inside = false;
   });
-  window.addEventListener('mouseup', () => {
-    input.mouseDown = false;
+  canvas.addEventListener('pointerdown', () => {
+    mouse.active = true;
   });
-  return input;
-}
 
-/** The stick position this frame: keyboard wins, the mouse blends in. */
-export function readStick(input) {
-  let pitch = 0;
-  let roll = 0;
-  if (input.keys.has('ArrowUp') || input.keys.has('KeyW')) pitch += 1;
-  if (input.keys.has('ArrowDown') || input.keys.has('KeyS')) pitch -= 1;
-  if (input.keys.has('ArrowLeft') || input.keys.has('KeyA')) roll -= 1;
-  if (input.keys.has('ArrowRight') || input.keys.has('KeyD')) roll += 1;
-  if (input.mouseActive) {
-    // Mouse up is nose up; mouse left banks left.
-    const mp = -input.mouseY;
-    const mr = input.mouseX;
-    if (pitch === 0) pitch = mp * 0.85;
-    else pitch = Math.max(-1, Math.min(1, pitch + mp * 0.4));
-    if (roll === 0) roll = mr * 0.85;
-    else roll = Math.max(-1, Math.min(1, roll + mr * 0.4));
-  }
-  let throttleDelta = 0;
-  if (input.keys.has('ShiftLeft') || input.keys.has('ShiftRight') || input.keys.has('Equal')) {
-    throttleDelta += 1;
-  }
-  if (input.keys.has('ControlLeft') || input.keys.has('ControlRight') || input.keys.has('Minus')) {
-    throttleDelta -= 1;
-  }
-  return { pitch, roll, throttleDelta };
-}
+  // A key pressed this frame: the loop clears the set after reading it.
+  const pressed = new Set();
+  window.addEventListener('keydown', (e) => pressed.add(code(e)));
 
-/** True once when the key was pressed since the last check. */
-export function wasPressed(input, code) {
-  if (input.pressed === code) {
-    input.pressed = null;
-    return true;
-  }
-  return false;
-}
-
-/** Take and clear the pending click, if any. */
-export function takeClick(input) {
-  const click = input.click;
-  input.click = null;
-  return click;
+  return {
+    keys,
+    mouse,
+    pressed,
+    clearPressed() {
+      pressed.clear();
+    },
+    // Steering axes in [-1, 1]: positive pitch climbs, positive roll banks right.
+    axes() {
+      let pitch = 0;
+      let roll = 0;
+      if (keys.has('ArrowUp') || keys.has('KeyW')) pitch += 1;
+      if (keys.has('ArrowDown') || keys.has('KeyS')) pitch -= 1;
+      if (keys.has('ArrowLeft') || keys.has('KeyA')) roll -= 1;
+      if (keys.has('ArrowRight') || keys.has('KeyD')) roll += 1;
+      // The mouse steers when no arrow key is held: left/right banks,
+      // up/down pitches, measured from the centre of the screen.
+      if (pitch === 0 && roll === 0 && mouse.active && mouse.inside) {
+        roll = (mouse.x - 0.5) * 2;
+        pitch = (0.5 - mouse.y) * 2;
+        roll = Math.max(-1, Math.min(1, roll));
+        pitch = Math.max(-1, Math.min(1, pitch));
+      }
+      return {
+        pitch,
+        roll,
+        throttleUp: keys.has('ShiftLeft') || keys.has('ShiftRight'),
+        throttleDown: keys.has('ControlLeft') || keys.has('ControlRight'),
+        flaps: keys.has('KeyF'),
+      };
+    },
+    // One-shot keys: true once per physical press.
+    wasPressed(...names) {
+      return names.some((n) => pressed.has(n));
+    },
+  };
 }

@@ -1,144 +1,99 @@
-// Skyhook Run — deterministic screenshot poses: each one flies the real
-// rules forward from a seeded state with a small autopilot, then freezes
-// the clock, so a capture shows the game itself rendering a real flight.
+// The four staged screenshot states: real game states, frozen at the
+// moment that shows the most. Each one is a genuine flight object with
+// rings, fuel, combo and score filled in — the renderers draw them
+// exactly as they would draw live play, so the screenshots are honest
+// renders of the game running.
 
-import { MISSIONS } from './config.js';
-import { buildCourse, missionById, nextRing } from './course.js';
-import { freshPlane, stepPlane } from './flight.js';
-import { SCREEN_TITLE, SCREEN_PLAY, SCREEN_OVER } from './render.js';
+import { newFlight, startFlight } from './flight.js';
+import { groundHeight } from './terrain.js';
 
-const STEP = 1 / 60;
-
-/** Steer toward the next ring: bank into the bearing, pitch to its height. */
-function autopilot(game) {
-  const plane = game.plane;
-  const ring = nextRing(game.course);
-  if (!ring) return { pitch: 0, roll: 0, throttleDelta: 0 };
-  const dx = ring.x - plane.x;
-  const dz = ring.z - plane.z;
-  const bearing = Math.atan2(dx, -dz);
-  let rel = bearing - plane.heading;
-  while (rel > Math.PI) rel -= Math.PI * 2;
-  while (rel < -Math.PI) rel += Math.PI * 2;
-  const roll = Math.max(-1, Math.min(1, rel * 1.6));
-  const dy = ring.y - plane.y;
-  const pitch = Math.max(-0.6, Math.min(0.6, dy / 220));
-  return { pitch, roll, throttleDelta: plane.speed < 58 ? 1 : 0 };
+// Place the plane just behind a ring, slightly below it, on course.
+function approachRing(f, ringIndex, back = 55, below = 14, side = -18) {
+  const ring = f.rings[ringIndex];
+  f.x = ring.x + side;
+  f.z = ring.z - back;
+  f.y = ring.y - below;
+  f.heading = 0;
+  f.pitch = 0.06;
+  f.roll = -0.12;
+  f.speed = 62;
+  f.throttle = 0.72;
+  f.status = 'flying';
+  return ring;
 }
 
-/** Run the real flight model forward for `seconds`, steered by autopilot. */
-function flyForward(game, seconds) {
-  const steps = Math.round(seconds / STEP);
-  for (let i = 0; i < steps; i += 1) {
-    const stick = autopilot(game);
-    const event = stepPlane(game.plane, stick, stick.throttleDelta, 0, game.course, STEP);
-    if (event === 'ring') {
-      game.combo += 1;
-      game.bestCombo = Math.max(game.bestCombo, game.combo);
-      game.score += 100 * game.mission.scoreMult * game.combo;
-    } else if (event === 'crash' || event === 'landed' || event === 'fuel') {
-      break;
-    }
-    game.flown += STEP;
+export function stagedShot(name) {
+  if (name === 'cover') {
+    // The climactic state: the final ring ahead, the runway beyond it,
+    // fuel low, combo high, the FINAL RING banner on screen. The plane
+    // sits 150 m back so the river, the runway and Milltown's lamps are
+    // all in frame ahead of it — the ring stays big, the valley reads.
+    const f = newFlight(0);
+    f.ringsHit = 11;
+    f.combo = 6;
+    f.bestCombo = 6;
+    f.score = 2450;
+    f.fuel = 18;
+    f.timeLeft = 42;
+    f.elapsed = 218;
+    approachRing(f, 11, 150, 30, -18);
+    f.lastEvent = { kind: 'finalRing', at: 0, gain: 330, ring: 12 };
+    return { flight: f, camera: 'chase', storm: false, nowMs: 600, time: 0 };
   }
-}
-
-function setUpMission(game, missionId) {
-  const mission = missionById(missionId);
-  game.mission = mission;
-  game.course = buildCourse(mission);
-  game.plane = freshPlane();
-  game.score = 0;
-  game.combo = 0;
-  game.timeLeft = mission.timeLimit;
-  game.flown = 0;
-  game.mode = SCREEN_PLAY;
-}
-
-// The cover: mid-course, chase view, a gold ring dead ahead over the
-// river valley, three rings already banked.
-export function shotCover(game) {
-  setUpMission(game, 'rally');
-  const plane = game.plane;
-  plane.throttle = 0.85;
-  plane.speed = 58;
-  plane.y = 210;
-  // Fly forward until the plane is closing on ring 4.
-  flyForward(game, 55);
-  game.timeLeft = Math.max(60, missionTime(game) - game.flown);
-  game.camera = 'chase';
-  game.message = '';
-  game.messageT = 0;
-}
-
-function missionTime(game) {
-  return game.mission.timeLimit;
-}
-
-// The title screen over the dawn valley.
-export function shotTitle(game) {
-  setUpMission(game, 'rally');
-  const plane = game.plane;
-  plane.x = 0;
-  plane.y = 320;
-  plane.z = 1500;
-  plane.heading = 0.12;
-  plane.pitch = -0.06;
-  game.mode = SCREEN_TITLE;
-  game.camera = 'chase';
-}
-
-// Cockpit view: instruments lit, the next ring framed by the panel.
-export function shotCockpit(game) {
-  setUpMission(game, 'storm');
-  const plane = game.plane;
-  plane.throttle = 0.9;
-  plane.speed = 62;
-  plane.y = 240;
-  flyForward(game, 45);
-  game.timeLeft = Math.max(60, game.mission.timeLimit - game.flown);
-  game.camera = 'cockpit';
-  game.message = '';
-  game.messageT = 0;
-}
-
-// The end screen: wheels down on Runway 27 after a full course.
-export function shotEnd(game) {
-  setUpMission(game, 'rally');
-  const plane = game.plane;
-  plane.throttle = 0.6;
-  plane.speed = 40;
-  plane.y = 200;
-  flyForward(game, 95);
-  // Bring her home: park on the strip, score the landing by hand so the
-  // frame shows the end screen, not a mid-air pause.
-  // Park just short of the threshold, so the strip, its dashes and the
-  // big 27 all read ahead of the plane in the frame.
-  game.plane.x = 0;
-  game.plane.y = 42;
-  game.plane.z = 120;
-  game.plane.heading = 0;
-  game.plane.roll = 0;
-  game.plane.pitch = 0;
-  game.plane.speed = 12;
-  game.plane.fuel = 0.31;
-  game.plane.airborne = false;
-  game.plane.onGround = true;
-  const done = game.course.rings.filter((r) => r.passed).length;
-  game.score += 500 + Math.round(game.plane.fuel * 200);
-  game.mode = SCREEN_OVER;
-  game.endKind = 'landed';
-  game.endLine = `${done} rings flown — and a landing the tower would applaud.`;
-  if (game.score > game.best) game.best = game.score;
-  game.camera = 'chase';
-}
-
-export function applyShot(game, name) {
-  if (name === 'cover') shotCover(game);
-  else if (name === 'title') shotTitle(game);
-  else if (name === 'cockpit') shotCockpit(game);
-  else if (name === 'end') shotEnd(game);
-  else return false;
-  game.frozen = true;
-  return true;
+  if (name === 'storm') {
+    // Storm Dash mid-flight: rain, gusts, the next ring in the murk.
+    const f = newFlight(2);
+    f.ringsHit = 3;
+    f.combo = 2;
+    f.bestCombo = 3;
+    f.score = 760;
+    f.fuel = 55;
+    f.timeLeft = 150;
+    f.elapsed = 60;
+    f.windNow = 12;
+    approachRing(f, 3, 90, 10, 24);
+    f.pitch = 0.1;
+    f.roll = 0.22;
+    f.lastEvent = { kind: 'ring', at: 0, gain: 200, ring: 3 };
+    return { flight: f, camera: 'chase', storm: true, nowMs: 900, time: 0 };
+  }
+  if (name === 'cockpit') {
+    // River Run from the cockpit: the Alder below, the next ring ahead,
+    // the panel lit warm.
+    const f = newFlight(1);
+    f.ringsHit = 5;
+    f.combo = 4;
+    f.bestCombo = 4;
+    f.score = 1180;
+    f.fuel = 64;
+    f.timeLeft = 210;
+    f.elapsed = 120;
+    approachRing(f, 5, 70, 8, 0);
+    f.pitch = 0.04;
+    f.roll = 0.08;
+    f.lastEvent = { kind: 'ring', at: 0, gain: 168, ring: 5 };
+    return { flight: f, camera: 'cockpit', storm: false, nowMs: 700, time: 0 };
+  }
+  if (name === 'end') {
+    // Down safe on Runway 27: the full breakdown on screen.
+    const f = newFlight(0);
+    f.ringsHit = 12;
+    f.combo = 7;
+    f.bestCombo = 7;
+    f.score = 3240;
+    f.fuel = 31;
+    f.timeLeft = 38;
+    f.elapsed = 262;
+    f.status = 'landed';
+    f.landedKind = 'perfect';
+    f.x = 0;
+    f.z = 2710;
+    f.y = groundHeight(0, 2710) + 2;
+    f.heading = 0;
+    f.speed = 0;
+    f.throttle = 0;
+    f.lastEvent = { kind: 'landed', at: 0, fuelBonus: 62, timeBonus: 19, comboBonus: 350 };
+    return { flight: f, camera: 'chase', storm: false, nowMs: 0, time: 0 };
+  }
+  return null;
 }

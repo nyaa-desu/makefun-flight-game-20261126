@@ -1,793 +1,511 @@
-// Skyhook Run — the renderer, part one: a small 3D projector and the
-// world it draws — sky, valley, runway, town, clouds and rings.
-// Everything is drawn with the Canvas 2D API; there are no images.
+// The chase view: dusk sky, sun glare, haze, and the valley floor drawn
+// as perspective bands — river winding, Milltown's lamps, Runway 27's
+// edge lights — with the Kestrel big in frame and the next ring ahead.
+// Everything is Canvas 2D, deterministic for a fixed state and time.
 
-import { VIEW, SKY, RUNWAY, WORLD } from './config.js';
-import { heightAt, groundColour, onRunway, townBuildings, treeSpots, cloudPuffs, riverX } from './terrain.js';
-import { valueNoise } from './random.js';
-import { nextRing } from './course.js';
+import { PALETTE, TUNE, riverX } from './config.js';
+import { groundHeight, groundKind } from './terrain.js';
+import { mulberry32 } from './random.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_OVER = 'over';
-export const SCREEN_PAUSE = 'pause';
+// ---- small helpers ----
 
-// ---- projection -------------------------------------------------------
-
-function rotatePoint(px, py, pz, sin, cos) {
-  return { x: px * cos - pz * sin, y: py, z: px * sin + pz * cos };
+function hexRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/**
- * Build a camera from the plane: chase view sits behind and above the
- * Kestrel, cockpit view sits in her nose. Returns the projector.
- */
-export function makeCamera(plane, mode, width, height) {
-  const focal = (height / 2) / Math.tan(VIEW.fov / 2);
-  const fx = Math.sin(plane.heading);
-  const fz = -Math.cos(plane.heading);
-  let cx;
-  let cy;
-  let cz;
-  let lookX;
-  let lookY;
-  let lookZ;
-  if (mode === 'cockpit') {
-    cx = plane.x + fx * 1.2;
-    cy = plane.y + VIEW.cockpitUp;
-    cz = plane.z + fz * 1.2;
-    lookX = plane.x + fx * 60;
-    lookY = plane.y + Math.sin(plane.pitch) * 60;
-    lookZ = plane.z + fz * 60;
+function lerpColor(a, b, t) {
+  const ca = hexRgb(a);
+  const cb = hexRgb(b);
+  const r = Math.round(ca[0] + (cb[0] - ca[0]) * t);
+  const g = Math.round(ca[1] + (cb[1] - ca[1]) * t);
+  const bl = Math.round(ca[2] + (cb[2] - ca[2]) * t);
+  return `rgb(${r},${g},${bl})`;
+}
+
+// ---- camera ----
+
+export function makeCamera(f) {
+  return {
+    x: f.x - Math.sin(f.heading) * TUNE.cameraBack,
+    y: f.y + TUNE.cameraUp,
+    z: f.z - Math.cos(f.heading) * TUNE.cameraBack,
+    heading: f.heading,
+  };
+}
+
+// Project a world point to the screen. Returns null behind the camera.
+export function project(cam, x, y, z, W, H, focal) {
+  const dx = x - cam.x;
+  const dz = z - cam.z;
+  const forward = dx * Math.sin(cam.heading) + dz * Math.cos(cam.heading);
+  if (forward < 2) return null;
+  const lateral = dx * Math.cos(cam.heading) - dz * Math.sin(cam.heading);
+  const s = focal / forward;
+  const horizonY = H * 0.4;
+  return { sx: W / 2 + lateral * s, sy: horizonY + (cam.y - y) * s, s };
+}
+
+// ---- sky ----
+
+function drawSky(ctx, W, H, time, storm) {
+  const horizonY = H * 0.4;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  if (storm) {
+    g.addColorStop(0, '#141428');
+    g.addColorStop(0.35, '#2c2c48');
+    g.addColorStop(0.55, '#5a4450');
+    g.addColorStop(1, '#8a6a58');
   } else {
-    cx = plane.x - fx * VIEW.chaseBack + Math.sin(plane.heading + Math.PI / 2) * Math.sin(plane.roll) * 3;
-    cy = plane.y + VIEW.chaseUp;
-    cz = plane.z - fz * VIEW.chaseBack;
-    lookX = plane.x + fx * 40;
-    lookY = plane.y - 2 + Math.sin(plane.pitch) * 30;
-    lookZ = plane.z + fz * 40;
+    g.addColorStop(0, PALETTE.skyTop);
+    g.addColorStop(0.35, PALETTE.skyMid);
+    g.addColorStop(0.62, PALETTE.skyLow);
+    g.addColorStop(0.75, PALETTE.horizon);
+    g.addColorStop(1, PALETTE.horizon);
   }
-  // Yaw from the look direction, pitch from its slope, roll from the bank.
-  const dx = lookX - cx;
-  const dy = lookY - cy;
-  const dz = lookZ - cz;
-  const yaw = Math.atan2(dx, -dz);
-  const pitch = Math.atan2(dy, Math.hypot(dx, dz));
-  const roll = mode === 'cockpit' ? plane.roll : plane.roll * 0.35;
-  const cyaw = Math.cos(-yaw);
-  const syaw = Math.sin(-yaw);
-  const cpitch = Math.cos(-pitch);
-  const spitch = Math.sin(-pitch);
-  const croll = Math.cos(-roll);
-  const sroll = Math.sin(-roll);
-
-  function project(x, y, z) {
-    let px = x - cx;
-    let py = y - cy;
-    let pz = z - cz;
-    let r = rotatePoint(px, py, pz, syaw, cyaw);
-    px = r.x; py = r.y; pz = r.z;
-    // Pitch around the camera's x axis.
-    const py2 = py * cpitch - pz * spitch;
-    const pz2 = py * spitch + pz * cpitch;
-    py = py2; pz = pz2;
-    // Roll around the view axis.
-    const px2 = px * croll - py * sroll;
-    const py3 = px * sroll + py * croll;
-    px = px2; py = py3;
-    const depth = -pz;
-    if (depth < 0.5) return null;
-    const s = focal / depth;
-    return { x: width / 2 + px * s, y: height / 2 - py * s, s, depth };
-  }
-  return { project, pitch, focal, width, height };
-}
-
-// ---- sky ---------------------------------------------------------------
-
-function drawSky(ctx, camera, plane, mission, time) {
-  const { width, height } = camera;
-  const g = ctx.createLinearGradient(0, 0, 0, height);
-  const storm = mission.id === 'storm' ? 0.55 : 0;
-  g.addColorStop(0, mixColour(SKY.horizonTop, '#3a3a4a', storm));
-  g.addColorStop(0.45, mixColour(SKY.horizonMid, '#8a7a72', storm));
-  g.addColorStop(0.62, SKY.horizonLow);
-  g.addColorStop(1, '#c8b490');
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, width, height);
-  // The sun sits low ahead of the runway, where the course runs.
-  const sun = camera.project(plane.x + Math.sin(plane.heading) * 4000, 900, plane.z - Math.cos(plane.heading) * 4000);
-  if (sun) {
-    ctx.fillStyle = SKY.sun;
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    ctx.arc(sun.x, sun.y, 34, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 0.25;
-    ctx.beginPath();
-    ctx.arc(sun.x, sun.y, 70, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars fading in at the top of the dusk.
+  const rng = mulberry32(99);
+  ctx.fillStyle = 'rgba(255, 244, 214, 0.85)';
+  for (let i = 0; i < 70; i++) {
+    const sx = rng() * W;
+    const sy = rng() * H * 0.24;
+    const a = 0.25 + rng() * 0.55;
+    ctx.globalAlpha = a * (storm ? 0.25 : 1);
+    ctx.fillRect(sx, sy, 1.4, 1.4);
   }
-}
+  ctx.globalAlpha = 1;
 
-function mixColour(a, b, t) {
-  const na = parseInt(a.slice(1), 16);
-  const nb = parseInt(b.slice(1), 16);
-  const r = Math.round(((na >> 16) & 255) * (1 - t) + ((nb >> 16) & 255) * t);
-  const gg = Math.round(((na >> 8) & 255) * (1 - t) + ((nb >> 8) & 255) * t);
-  const bb = Math.round((na & 255) * (1 - t) + (nb & 255) * t);
-  return `rgb(${r},${gg},${bb})`;
-}
-
-// ---- distant mountains ----------------------------------------------------
-
-/**
- * A hazy mountain ridge at the horizon, drawn in screen space from the
- * camera's pitch and heading, so it pans as the pilot looks around. It
- * hides the hard edge where the near terrain grid runs out and gives the
- * valley a far wall on every side.
- */
-function drawFarRidge(ctx, camera, plane) {
-  const { width, height } = camera;
-  const horizonY = height / 2 - Math.tan(camera.pitch) * camera.focal;
-  if (horizonY < -260 || horizonY > height + 260) return;
-  const layers = [
-    { colour: 'rgba(125,138,168,0.55)', scale: 1.5, base: 46 },
-    { colour: 'rgba(85,100,138,0.8)', scale: 1, base: 26 },
-  ];
-  for (const layer of layers) {
-    ctx.fillStyle = layer.colour;
+  // The low sun and its glare, or the storm's lightning glow.
+  const sunX = W * 0.7;
+  const sunY = horizonY - H * 0.045;
+  if (storm) {
+    const lg = ctx.createRadialGradient(sunX, horizonY, 0, sunX, horizonY, W * 0.3);
+    lg.addColorStop(0, 'rgba(230, 220, 255, 0.5)');
+    lg.addColorStop(1, 'rgba(230, 220, 255, 0)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(0, 0, W, H);
+  } else {
+    const glow = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, H * 0.26);
+    glow.addColorStop(0, PALETTE.sunGlow);
+    glow.addColorStop(1, 'rgba(255, 154, 60, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = PALETTE.sun;
     ctx.beginPath();
-    ctx.moveTo(-40, horizonY + 30);
-    for (let sx = -40; sx <= width + 40; sx += 24) {
-      const angle = plane.heading + (sx - width / 2) / camera.focal;
-      const n = valueNoise(angle * 6, 3, 220, WORLD.seed + 41);
-      const n2 = valueNoise(angle * 17, 9, 90, WORLD.seed + 43);
-      const peak = layer.base + (n * 0.5 + 0.5) * 88 * layer.scale + (n2 * 0.5 + 0.5) * 30;
-      ctx.lineTo(sx, horizonY - peak);
+    ctx.arc(sunX, sunY, H * 0.042, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255, 220, 160, 0.9)';
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, H * 0.028, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Slow clouds, dark bellies with amber rims.
+  const crng = mulberry32(41);
+  for (let i = 0; i < 6; i++) {
+    const bx = ((crng() * W + time * (6 + i * 2)) % (W + 320)) - 160;
+    const by = H * (0.1 + crng() * 0.2);
+    const bw = 130 + crng() * 190;
+    const bh = 16 + crng() * 14;
+    ctx.fillStyle = storm ? 'rgba(30, 28, 52, 0.85)' : 'rgba(52, 38, 78, 0.8)';
+    ctx.beginPath();
+    ctx.ellipse(bx, by, bw / 2, bh / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = storm ? 'rgba(150, 140, 190, 0.25)' : 'rgba(255, 170, 100, 0.28)';
+    ctx.beginPath();
+    ctx.ellipse(bx, by - bh * 0.28, bw / 2.4, bh * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Haze sitting on the horizon.
+  ctx.fillStyle = PALETTE.haze;
+  ctx.fillRect(0, horizonY - H * 0.02, W, H * 0.05);
+  ctx.fillStyle = 'rgba(232, 144, 90, 0.1)';
+  ctx.fillRect(0, horizonY + H * 0.03, W, H * 0.04);
+}
+
+// ---- terrain bands ----
+
+const BAND_COLORS = {
+  field: [PALETTE.fieldGreen, PALETTE.fieldDark],
+  fieldAmber: [PALETTE.fieldAmber, '#7a5c30'],
+  forest: [PALETTE.forest, '#243d2a'],
+  river: [PALETTE.river, '#4e6f96'],
+  town: [PALETTE.townGround, '#3e352e'],
+  runway: [PALETTE.runway, '#26262c'],
+  marsh: [PALETTE.marsh, '#3e4c3a'],
+};
+
+function bandColor(kind, x, z, dz) {
+  const pair = BAND_COLORS[kind] || BAND_COLORS.field;
+  const n = Math.sin(x * 0.021 + z * 0.013) * 0.5 + 0.5;
+  const base = lerpColor(pair[0], pair[1], n);
+  // Distance haze: far ground melts into the amber horizon.
+  const haze = Math.min(0.72, dz / 1500);
+  return lerpColor(base, PALETTE.horizon, haze);
+}
+
+function drawGround(ctx, cam, W, H, focal) {
+  // Depth slices, thin near the camera, wide far away.
+  const slices = [];
+  let z = cam.z + 2;
+  while (z < cam.z + TUNE.drawDistance) {
+    slices.push(z);
+    z += Math.max(3, (z - cam.z) * 0.05);
+  }
+  // Columns across the valley.
+  const VALLEY_HALF = 420;
+  const cols = [];
+  for (let x = -VALLEY_HALF; x <= VALLEY_HALF; x += 70) cols.push(x);
+  // Project every (column, slice) ground point once.
+  const pts = slices.map((sz) =>
+    cols.map((cx) => {
+      const gy = groundHeight(cx, sz);
+      const p = project(cam, cx, gy, sz, W, H, focal);
+      return { p, kind: groundKind(cx, sz) };
+    }),
+  );
+  // Draw far to near so near bands overlap far ones.
+  for (let i = slices.length - 2; i >= 0; i--) {
+    const zA = slices[i];
+    const zB = slices[i + 1];
+    const dz = zB - cam.z;
+    for (let c = 0; c < cols.length - 1; c++) {
+      const a0 = pts[i][c];
+      const a1 = pts[i][c + 1];
+      const b0 = pts[i + 1][c];
+      const b1 = pts[i + 1][c + 1];
+      if (!a0.p || !a1.p || !b0.p || !b1.p) continue;
+      const midX = (cols[c] + cols[c + 1]) / 2;
+      const midZ = (zA + zB) / 2;
+      // Sample three points across the quad: the river (52 m) and the
+      // runway (60 m) are narrower than a 70 m column, so a single
+      // midpoint sample misses them entirely and the valley reads as
+      // one brown mountain. A narrow feature anywhere in the quad
+      // colours the quad.
+      const samples = [groundKind(midX - 20, midZ), groundKind(midX, midZ), groundKind(midX + 20, midZ)];
+      const kind = samples.includes('river')
+        ? 'river'
+        : samples.includes('runway')
+          ? 'runway'
+          : samples.includes('town')
+            ? 'town'
+            : groundKind(midX, midZ);
+      ctx.fillStyle = bandColor(kind, midX, (zA + zB) / 2, dz);
+      ctx.beginPath();
+      ctx.moveTo(a0.p.sx, a0.p.sy);
+      ctx.lineTo(a1.p.sx, a1.p.sy);
+      ctx.lineTo(b1.p.sx, b1.p.sy);
+      ctx.lineTo(b0.p.sx, b0.p.sy);
+      ctx.closePath();
+      ctx.fill();
     }
-    ctx.lineTo(width + 40, horizonY + 30);
-    ctx.closePath();
-    ctx.fill();
   }
-}
-
-// ---- terrain -----------------------------------------------------------
-
-function drawTerrain(ctx, camera, plane) {
-  const step = 90;
-  const range = 1500;
-  const half = 900;
-  const fx = Math.sin(plane.heading);
-  const fz = -Math.cos(plane.heading);
-  const rx = Math.cos(plane.heading);
-  const rz = Math.sin(plane.heading);
-  const cells = [];
-  for (let a = 40; a <= range; a += step) {
-    for (let b = -half; b <= half; b += step) {
-      const x = plane.x + fx * a + rx * b;
-      const z = plane.z + fz * a + rz * b;
-      if (x < -WORLD.halfWidth - 200 || x > WORLD.halfWidth + 200) continue;
-      if (z < WORLD.north - 200 || z > WORLD.south + 200) continue;
-      cells.push({ x, z, a, b });
-    }
-  }
-  // Far first, near last: the painter's order.
-  cells.sort((m, n) => n.a - m.a);
-  for (const cell of cells) {
-    const { x, z } = cell;
-    const h00 = heightAt(x, z);
-    const h10 = heightAt(x + step, z);
-    const h01 = heightAt(x, z + step);
-    const h11 = heightAt(x + step, z + step);
-    const flat = h00 < 4 && h10 < 4 && h01 < 4 && h11 < 4;
-    const y00 = flat ? WORLD.waterLevel : h00;
-    const y10 = flat ? WORLD.waterLevel : h10;
-    const y01 = flat ? WORLD.waterLevel : h01;
-    const y11 = flat ? WORLD.waterLevel : h11;
-    const p00 = camera.project(x, y00, z);
-    const p10 = camera.project(x + step, y10, z);
-    const p01 = camera.project(x, y01, z + step);
-    const p11 = camera.project(x + step, y11, z + step);
-    if (!p00 || !p10 || !p01 || !p11) continue;
-    const slope = (h10 + h01 - h00 - h11) / step;
-    ctx.fillStyle = groundColour(x + step / 2, z + step / 2, (h00 + h10 + h01 + h11) / 4, slope);
-    ctx.beginPath();
-    ctx.moveTo(p00.x, p00.y);
-    ctx.lineTo(p10.x, p10.y);
-    ctx.lineTo(p11.x, p11.y);
-    ctx.lineTo(p01.x, p01.y);
-    ctx.closePath();
-    ctx.fill();
-  }
-  drawRunway(ctx, camera);
-  drawTown(ctx, camera);
-  drawTrees(ctx, camera, plane);
-  drawClouds(ctx, camera, plane);
-}
-
-function drawRunway(ctx, camera) {
-  const half = RUNWAY.width / 2;
-  const z0 = RUNWAY.centreZ - RUNWAY.length / 2;
-  const z1 = RUNWAY.centreZ + RUNWAY.length / 2;
-  const y = WORLD.fieldHeight + 0.6;
-  const corners = [
-    camera.project(RUNWAY.centreX - half, y, z0),
-    camera.project(RUNWAY.centreX + half, y, z0),
-    camera.project(RUNWAY.centreX + half, y, z1),
-    camera.project(RUNWAY.centreX - half, y, z1),
-  ];
-  if (corners.some((p) => !p)) return;
-  ctx.fillStyle = SKY.runway;
-  ctx.beginPath();
-  ctx.moveTo(corners[0].x, corners[0].y);
-  corners.slice(1).forEach((p) => ctx.lineTo(p.x, p.y));
-  ctx.closePath();
-  ctx.fill();
-  // Centreline dashes and the big 27 at the threshold.
-  ctx.strokeStyle = SKY.runwayMark;
+  // The river's amber glint: a bright streak down its centreline.
+  ctx.strokeStyle = 'rgba(216, 138, 74, 0.5)';
   ctx.lineWidth = 2;
-  for (let z = z0 + 40; z < z1 - 20; z += 90) {
-    const a = camera.project(RUNWAY.centreX, y + 0.2, z);
-    const b = camera.project(RUNWAY.centreX, y + 0.2, z + 44);
-    if (!a || !b) continue;
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.stroke();
-  }
-  const num = camera.project(RUNWAY.centreX, y + 0.2, z0 + 60);
-  if (num && num.s > 0.4) {
-    ctx.fillStyle = SKY.runwayMark;
-    ctx.font = `bold ${Math.max(10, num.s * 26)}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText('27', num.x, num.y);
-  }
-}
-
-const TOWN = townBuildings();
-const TREES = treeSpots();
-const CLOUDS = cloudPuffs();
-
-function drawTown(ctx, camera) {
-  for (const b of TOWN) {
-    const y0 = heightAt(b.x, b.z);
-    const y1 = y0 + b.h;
-    const c = [
-      camera.project(b.x - b.w / 2, y0, b.z - b.d / 2),
-      camera.project(b.x + b.w / 2, y0, b.z - b.d / 2),
-      camera.project(b.x + b.w / 2, y1, b.z - b.d / 2),
-      camera.project(b.x - b.w / 2, y1, b.z - b.d / 2),
-      camera.project(b.x + b.w / 2, y0, b.z + b.d / 2),
-      camera.project(b.x + b.w / 2, y1, b.z + b.d / 2),
-    ];
-    if (c.some((p) => !p)) continue;
-    ctx.fillStyle = b.warm ? '#8a6f5c' : '#6f7d8a';
-    ctx.beginPath();
-    ctx.moveTo(c[0].x, c[0].y);
-    ctx.lineTo(c[1].x, c[1].y);
-    ctx.lineTo(c[2].x, c[2].y);
-    ctx.lineTo(c[3].x, c[3].y);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = '#5a5148';
-    ctx.beginPath();
-    ctx.moveTo(c[1].x, c[1].y);
-    ctx.lineTo(c[4].x, c[4].y);
-    ctx.lineTo(c[5].x, c[5].y);
-    ctx.lineTo(c[2].x, c[2].y);
-    ctx.closePath();
-    ctx.fill();
-    // Lit windows: warm squares on the front face.
-    if (b.warm) {
-      ctx.fillStyle = '#ffd98a';
-      const wx = (c[0].x + c[1].x) / 2;
-      const wy = (c[0].y + c[2].y) / 2;
-      const ws = Math.max(2, c[2].s * 2.5);
-      ctx.fillRect(wx - ws / 2, wy - ws / 2, ws, ws);
-    }
-  }
-}
-
-function drawTrees(ctx, camera, plane) {
-  ctx.fillStyle = SKY.forest;
-  for (const t of TREES) {
-    const dx = t.x - plane.x;
-    const dz = t.z - plane.z;
-    if (dx * dx + dz * dz > 900 * 900) continue;
-    const y = heightAt(t.x, t.z);
-    const base = camera.project(t.x, y, t.z);
-    const top = camera.project(t.x, y + t.s, t.z);
-    if (!base || !top) continue;
-    const w = Math.max(2, base.s * t.s * 0.45);
-    ctx.beginPath();
-    ctx.moveTo(top.x, top.y);
-    ctx.lineTo(base.x - w, base.y);
-    ctx.lineTo(base.x + w, base.y);
-    ctx.closePath();
-    ctx.fill();
-  }
-}
-
-function drawClouds(ctx, camera, plane) {
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  for (const c of CLOUDS) {
-    const p = camera.project(c.x, c.y, c.z);
+  ctx.beginPath();
+  let started = false;
+  for (let sz = cam.z + 10; sz < cam.z + TUNE.drawDistance; sz += 14) {
+    const rx = riverX(sz);
+    const p = project(cam, rx, groundHeight(rx, sz) + 1, sz, W, H, focal);
     if (!p) continue;
-    const r = Math.max(4, p.s * c.r * 0.5);
-    ctx.beginPath();
-    ctx.ellipse(p.x, p.y, r, r * 0.42, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-// ---- rings ---------------------------------------------------------------
-
-function drawRingShape(ctx, camera, ring, colour, width) {
-  const points = [];
-  const steps = 28;
-  for (let i = 0; i <= steps; i += 1) {
-    const a = (i / steps) * Math.PI * 2;
-    // Rings stand vertical, facing the course direction.
-    const px = ring.x + Math.cos(a) * ring.radius;
-    const py = ring.y + Math.sin(a) * ring.radius;
-    const p = camera.project(px, py, ring.z);
-    if (p) points.push(p);
-  }
-  if (points.length < 4) return;
-  ctx.strokeStyle = colour;
-  ctx.lineWidth = width;
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
-  ctx.closePath();
-  ctx.stroke();
-}
-
-export function drawRings(ctx, camera, course) {
-  const target = nextRing(course);
-  for (const ring of course.rings) {
-    if (ring.passed) continue;
-    const centre = camera.project(ring.x, ring.y, ring.z);
-    if (!centre) continue;
-    if (ring.missed) {
-      drawRingShape(ctx, camera, ring, 'rgba(200,80,60,0.35)', 2);
-      continue;
-    }
-    if (ring === target) {
-      drawRingShape(ctx, camera, ring, 'rgba(255,190,80,0.9)', Math.max(3, centre.s * 3));
-      drawRingShape(ctx, camera, { ...ring, radius: ring.radius * 0.72 }, 'rgba(255,220,140,0.55)', 2);
-      ctx.fillStyle = '#ffe9b0';
-      ctx.font = `bold ${Math.max(12, centre.s * 16)}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.fillText(`RING ${ring.index + 1}`, centre.x, centre.y - centre.s * ring.radius - 12);
+    if (!started) {
+      ctx.moveTo(p.sx, p.sy);
+      started = true;
     } else {
-      drawRingShape(ctx, camera, ring, 'rgba(140,200,255,0.5)', 2);
+      ctx.lineTo(p.sx, p.sy);
+    }
+  }
+  ctx.stroke();
+}
+
+// Milltown's lamps: warm dots with halos, seeded once.
+const LAMPS = (() => {
+  const rng = mulberry32(20261127);
+  const lamps = [];
+  for (let i = 0; i < 46; i++) {
+    lamps.push({
+      x: -260 + rng() * 190,
+      z: 1970 + rng() * 310,
+    });
+  }
+  return lamps;
+})();
+
+function drawTownLamps(ctx, cam, W, H, focal) {
+  for (const lamp of LAMPS) {
+    const p = project(cam, lamp.x, groundHeight(lamp.x, lamp.z) + 5, lamp.z, W, H, focal);
+    if (!p) continue;
+    if (p.sx < -20 || p.sx > W + 20 || p.sy < 0 || p.sy > H) continue;
+    const r = Math.max(1.5, 260 * p.s / 90);
+    ctx.fillStyle = PALETTE.lampGlow;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, r * 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = PALETTE.lamp;
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// Runway 27: edge lights, threshold bars and centreline dashes.
+function drawRunway(ctx, cam, W, H, focal) {
+  for (let sz = 2520; sz <= 2900; sz += 80) {
+    for (const side of [-28, 28]) {
+      const p = project(cam, side, groundHeight(side, sz) + 2, sz, W, H, focal);
+      if (!p) continue;
+      ctx.fillStyle = PALETTE.runwayLight;
+      ctx.beginPath();
+      ctx.arc(p.sx, p.sy, Math.max(1.5, 200 * p.s / 110), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // Threshold bars at the near end.
+  for (let x = -24; x <= 24; x += 8) {
+    const p = project(cam, x, groundHeight(x, 2505) + 1, 2505, W, H, focal);
+    if (!p) continue;
+    ctx.fillStyle = PALETTE.runwayMark;
+    ctx.fillRect(p.sx - 3 * p.s, p.sy - 1.5 * p.s, 6 * p.s, 3 * p.s);
+  }
+  // Centreline dashes.
+  ctx.fillStyle = 'rgba(232, 232, 232, 0.85)';
+  for (let sz = 2560; sz <= 2880; sz += 60) {
+    const p = project(cam, 0, groundHeight(0, sz) + 1, sz, W, H, focal);
+    if (!p) continue;
+    ctx.fillRect(p.sx - 1.5 * p.s, p.sy - 1 * p.s, 3 * p.s, 6 * p.s);
+  }
+}
+
+// ---- rings ----
+
+function drawRings(ctx, f, cam, W, H, focal) {
+  const ordered = [...f.rings].sort((a, b) => b.z - a.z);
+  for (const ring of ordered) {
+    const p = project(cam, ring.x, ring.y, ring.z, W, H, focal);
+    if (!p) continue;
+    const radius = ring.r * p.s;
+    if (radius < 2 || radius > W) continue;
+    const isNext = f.rings.indexOf(ring) === f.ringsHit;
+    const isFinal = ring.final;
+    const color = isFinal ? PALETTE.finalRing : PALETTE.ring;
+    // Glow.
+    ctx.strokeStyle = isFinal ? 'rgba(255, 90, 60, 0.5)' : PALETTE.ringGlow;
+    ctx.lineWidth = Math.max(3, radius * 0.3);
+    ctx.beginPath();
+    ctx.ellipse(p.sx, p.sy, radius, radius * 0.94, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // The ring itself.
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(2.5, radius * 0.13);
+    ctx.beginPath();
+    ctx.ellipse(p.sx, p.sy, radius, radius * 0.94, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // Inner tick marks, like a gunsight.
+    ctx.strokeStyle = 'rgba(255, 242, 216, 0.9)';
+    ctx.lineWidth = Math.max(1.5, radius * 0.05);
+    for (const a of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+      const x0 = p.sx + Math.cos(a) * radius * 0.82;
+      const y0 = p.sy + Math.sin(a) * radius * 0.82 * 0.94;
+      const x1 = p.sx + Math.cos(a) * radius * 0.66;
+      const y1 = p.sy + Math.sin(a) * radius * 0.66 * 0.94;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+    // The next ring gets its name and distance, so the pilot always
+    // knows the target and how far it is.
+    if (isNext) {
+      const dist = Math.round(Math.hypot(ring.x - f.x, ring.y - f.y, ring.z - f.z));
+      const label = isFinal ? `FINAL RING · ${dist} m` : `RING ${f.ringsHit + 1}/${f.rings.length} · ${dist} m`;
+      ctx.font = `bold ${Math.max(13, Math.round(radius * 0.22))}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(10, 12, 24, 0.75)';
+      const tw = ctx.measureText(label).width;
+      ctx.fillRect(p.sx - tw / 2 - 8, p.sy - radius - 30, tw + 16, 24);
+      ctx.fillStyle = isFinal ? '#ff8a6a' : '#ffd27a';
+      ctx.fillText(label, p.sx, p.sy - radius - 12);
     }
   }
 }
 
-// ---- the aircraft ---------------------------------------------------------
+// ---- the Kestrel ----
 
-export function drawPlaneChase(ctx, camera, plane) {
-  const { width, height } = camera;
-  const cx = width / 2;
-  const cy = height * 0.62;
-  const s = Math.min(width, height) / 560;
+// A bigger, built-looking bush plane seen from behind and slightly above:
+// wide wings, foreshortened fuselage, red tail, warm cockpit glow, nav
+// lights and a spinning prop. Drawn at (px, py), `size` wide, banked by roll.
+export function drawPlane(ctx, px, py, size, roll, time, shadowAlpha = 0.28) {
   ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(plane.roll * 0.9);
-  ctx.scale(s, s);
-  // Propeller disc, blurred by speed.
-  ctx.fillStyle = 'rgba(220,230,240,0.35)';
+  ctx.translate(px, py);
+  ctx.rotate(roll * 0.85);
+  const u = size / 230; // one unit: the sprite is 230 wide
+  // Soft shadow on the ground haze below — it fades out as the plane
+  // climbs, so a high plane never pretends to be near the ground.
+  ctx.fillStyle = `rgba(20, 16, 40, ${shadowAlpha})`;
   ctx.beginPath();
-  ctx.ellipse(0, -6, 34, 34, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 52 * u, 95 * u, 10 * u, 0, 0, Math.PI * 2);
   ctx.fill();
-  // Fuselage: a bush plane in cream and teal, with a lit cockpit.
-  ctx.fillStyle = '#e8ddc4';
+  // Main wing, spanning the frame, tips slightly up.
+  const wingGrad = ctx.createLinearGradient(0, -8 * u, 0, 12 * u);
+  wingGrad.addColorStop(0, PALETTE.planeAmber);
+  wingGrad.addColorStop(0.45, PALETTE.planeCream);
+  wingGrad.addColorStop(1, '#8a7a9a');
+  ctx.fillStyle = wingGrad;
   ctx.beginPath();
-  ctx.moveTo(0, -52);
-  ctx.quadraticCurveTo(14, -30, 12, 6);
-  ctx.quadraticCurveTo(10, 34, 0, 44);
-  ctx.quadraticCurveTo(-10, 34, -12, 6);
-  ctx.quadraticCurveTo(-14, -30, 0, -52);
-  ctx.fill();
-  ctx.fillStyle = '#2e7d7a';
-  ctx.fillRect(-12, -8, 24, 10);
-  // Wings and tail, banking with the roll.
-  ctx.fillStyle = '#2e7d7a';
-  ctx.beginPath();
-  ctx.moveTo(-118, 2);
-  ctx.lineTo(-10, -4);
-  ctx.lineTo(-10, 14);
-  ctx.lineTo(-118, 18);
+  ctx.moveTo(-112 * u, 4 * u);
+  ctx.quadraticCurveTo(-70 * u, -8 * u, -18 * u, -4 * u);
+  ctx.lineTo(18 * u, -4 * u);
+  ctx.quadraticCurveTo(70 * u, -8 * u, 112 * u, 4 * u);
+  ctx.quadraticCurveTo(70 * u, 12 * u, 20 * u, 10 * u);
+  ctx.lineTo(-20 * u, 10 * u);
+  ctx.quadraticCurveTo(-70 * u, 12 * u, -112 * u, 4 * u);
   ctx.closePath();
   ctx.fill();
+  // Wing struts.
+  ctx.strokeStyle = 'rgba(90, 70, 90, 0.8)';
+  ctx.lineWidth = 2 * u;
   ctx.beginPath();
-  ctx.moveTo(118, 2);
-  ctx.lineTo(10, -4);
-  ctx.lineTo(10, 14);
-  ctx.lineTo(118, 18);
+  ctx.moveTo(-58 * u, 6 * u);
+  ctx.lineTo(-34 * u, 26 * u);
+  ctx.moveTo(58 * u, 6 * u);
+  ctx.lineTo(34 * u, 26 * u);
+  ctx.stroke();
+  // Fuselage: tail near the camera, nose away, foreshortened.
+  const fusGrad = ctx.createLinearGradient(0, -34 * u, 0, 34 * u);
+  fusGrad.addColorStop(0, PALETTE.planeAmber);
+  fusGrad.addColorStop(0.4, PALETTE.planeCream);
+  fusGrad.addColorStop(1, '#7a6a8a');
+  ctx.fillStyle = fusGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, -58 * u);
+  ctx.quadraticCurveTo(15 * u, -44 * u, 15 * u, -18 * u);
+  ctx.quadraticCurveTo(15 * u, 12 * u, 9 * u, 30 * u);
+  ctx.quadraticCurveTo(0, 38 * u, -9 * u, 30 * u);
+  ctx.quadraticCurveTo(-15 * u, 12 * u, -15 * u, -18 * u);
+  ctx.quadraticCurveTo(-15 * u, -44 * u, 0, -58 * u);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = '#c65a3a';
+  // Panel lines and rivets.
+  ctx.strokeStyle = 'rgba(80, 60, 80, 0.55)';
+  ctx.lineWidth = 1 * u;
+  for (const yy of [-30, -8, 12]) {
+    ctx.beginPath();
+    ctx.moveTo(-13 * u, yy * u);
+    ctx.quadraticCurveTo(0, (yy + 2) * u, 13 * u, yy * u);
+    ctx.stroke();
+  }
+  // Cockpit windows, lit warm from inside.
+  ctx.fillStyle = PALETTE.planeGlass;
   ctx.beginPath();
-  ctx.moveTo(-34, 34);
-  ctx.lineTo(0, 26);
-  ctx.lineTo(34, 34);
-  ctx.lineTo(28, 46);
-  ctx.lineTo(-28, 46);
+  ctx.ellipse(-6 * u, -34 * u, 5.5 * u, 8 * u, -0.25, 0, Math.PI * 2);
+  ctx.ellipse(6 * u, -34 * u, 5.5 * u, 8 * u, 0.25, 0, Math.PI * 2);
+  ctx.fill();
+  // Tail fin, red tip.
+  ctx.fillStyle = PALETTE.planeRed;
+  ctx.beginPath();
+  ctx.moveTo(0, 30 * u);
+  ctx.lineTo(-11 * u, 52 * u);
+  ctx.lineTo(11 * u, 52 * u);
   ctx.closePath();
   ctx.fill();
-  // Cockpit glass, glowing warm.
-  ctx.fillStyle = '#ffd98a';
+  // Tailplane.
+  ctx.fillStyle = PALETTE.planeCream;
   ctx.beginPath();
-  ctx.ellipse(0, -26, 8, 12, 0, 0, Math.PI * 2);
+  ctx.moveTo(-34 * u, 38 * u);
+  ctx.lineTo(34 * u, 38 * u);
+  ctx.lineTo(26 * u, 46 * u);
+  ctx.lineTo(-26 * u, 46 * u);
+  ctx.closePath();
   ctx.fill();
-  // Navigation lights.
-  ctx.fillStyle = '#ff5a4a';
+  // Registration on the fuselage.
+  ctx.fillStyle = 'rgba(60, 40, 60, 0.85)';
+  ctx.font = `bold ${9 * u}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.fillText('KESTREL', 0, 4 * u);
+  // Propeller: a spinning translucent disc at the nose, plus spinner.
+  const propA = 0.16 + 0.06 * Math.sin(time * 40);
+  ctx.fillStyle = `rgba(220, 220, 230, ${propA})`;
   ctx.beginPath();
-  ctx.arc(-118, 10, 4, 0, Math.PI * 2);
+  ctx.ellipse(0, -58 * u, 5 * u, 26 * u, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = '#4aff7a';
+  ctx.fillStyle = '#3a3048';
   ctx.beginPath();
-  ctx.arc(118, 10, 4, 0, Math.PI * 2);
+  ctx.arc(0, -58 * u, 4 * u, 0, Math.PI * 2);
+  ctx.fill();
+  // Navigation lights: red left, green right, white tail.
+  const blink = 0.6 + 0.4 * Math.sin(time * 5);
+  ctx.fillStyle = `rgba(255, 60, 50, ${blink})`;
+  ctx.beginPath();
+  ctx.arc(-112 * u, 4 * u, 3.5 * u, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = `rgba(90, 255, 150, ${blink})`;
+  ctx.beginPath();
+  ctx.arc(112 * u, 4 * u, 3.5 * u, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = `rgba(255, 255, 255, ${blink})`;
+  ctx.beginPath();
+  ctx.arc(0, 52 * u, 3 * u, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
-// ---- cockpit -------------------------------------------------------------
+// ---- rain ----
 
-function drawCockpit(ctx, camera, plane) {
-  const { width, height } = camera;
-  // The nose and the panel frame the view.
-  const g = ctx.createLinearGradient(0, height * 0.62, 0, height);
-  g.addColorStop(0, 'rgba(40,44,54,0)');
-  g.addColorStop(0.25, '#2b2f3a');
-  g.addColorStop(1, '#1e2129');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, height * 0.62, width, height * 0.38);
-  // Nose cowling: a low dark shape, so it reads as the Kestrel's nose
-  // and not as a hill on the horizon.
-  ctx.fillStyle = '#1f4d4a';
+export function drawRain(ctx, W, H, seed, time) {
+  const rng = mulberry32(seed);
+  ctx.strokeStyle = 'rgba(200, 210, 235, 0.35)';
+  ctx.lineWidth = 1.2;
   ctx.beginPath();
-  ctx.moveTo(width / 2 - 44, height * 0.68);
-  ctx.quadraticCurveTo(width / 2, height * 0.63, width / 2 + 44, height * 0.68);
-  ctx.lineTo(width / 2 + 34, height * 0.7);
-  ctx.lineTo(width / 2 - 34, height * 0.7);
-  ctx.closePath();
-  ctx.fill();
-  drawGauge(ctx, width * 0.5, height * 0.86, 52, 'ATT', plane, 'attitude');
-  drawGauge(ctx, width * 0.34, height * 0.86, 40, 'ALT', plane, 'alt');
-  drawGauge(ctx, width * 0.66, height * 0.86, 40, 'SPD', plane, 'speed');
-  drawGauge(ctx, width * 0.2, height * 0.88, 30, 'FUEL', plane, 'fuel');
-  drawGauge(ctx, width * 0.8, height * 0.88, 30, 'THR', plane, 'throttle');
-  // Compass strip across the panel top.
-  ctx.fillStyle = '#14161c';
-  ctx.fillRect(width * 0.32, height * 0.68, width * 0.36, 22);
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 13px monospace';
-  ctx.textAlign = 'center';
-  const hdg = Math.round(((-plane.heading * 180) / Math.PI % 360 + 360) % 360);
-  ctx.fillText(`HDG ${String(hdg).padStart(3, '0')}°`, width * 0.5, height * 0.68 + 16);
-}
-
-function drawGauge(ctx, x, y, r, label, plane, kind) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.fillStyle = '#14161c';
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#ffd98a';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  for (let i = 0; i < 110; i++) {
+    const x = rng() * (W + 60);
+    const y = rng() * H;
+    const len = 14 + rng() * 14;
+    const drift = 6 + rng() * 6;
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - drift, y + len);
+  }
   ctx.stroke();
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 10px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText(label, 0, -r - 6);
-  if (kind === 'attitude') {
-    // Artificial horizon: the ball rolls and pitches with the plane.
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, 0, r - 4, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.rotate(plane.roll);
-    ctx.translate(0, plane.pitch * r * 2.2);
-    ctx.fillStyle = '#3a6ea8';
-    ctx.fillRect(-r, -r, r * 2, r);
-    ctx.fillStyle = '#8a6a42';
-    ctx.fillRect(-r, 0, r * 2, r);
-    ctx.restore();
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(-r + 8, 0);
-    ctx.lineTo(-8, 0);
-    ctx.moveTo(8, 0);
-    ctx.lineTo(r - 8, 0);
-    ctx.stroke();
-  } else if (kind === 'alt') {
-    const frac = Math.min(1, plane.y / 600);
-    needle(ctx, r, -Math.PI * 0.75 + frac * Math.PI * 1.5);
-    ctx.fillStyle = '#e8f0f8';
-    ctx.font = 'bold 12px monospace';
-    ctx.fillText(String(Math.round(plane.y)), 0, r * 0.45);
-  } else if (kind === 'speed') {
-    const frac = Math.min(1, plane.speed / 90);
-    needle(ctx, r, -Math.PI * 0.75 + frac * Math.PI * 1.5);
-    ctx.fillStyle = '#e8f0f8';
-    ctx.font = 'bold 12px monospace';
-    ctx.fillText(String(Math.round(plane.speed * 1.94)), 0, r * 0.45);
-  } else if (kind === 'fuel') {
-    ctx.fillStyle = plane.fuel < 0.2 ? '#ff5a4a' : '#4aff7a';
-    ctx.fillRect(-r + 6, -r + 6, (r * 2 - 12) * plane.fuel, 8);
-    ctx.strokeStyle = '#5a6272';
-    ctx.strokeRect(-r + 6, -r + 6, r * 2 - 12, 8);
-  } else if (kind === 'throttle') {
-    ctx.fillStyle = '#ffd98a';
-    ctx.fillRect(-r + 6, -r + 6, (r * 2 - 12) * plane.throttle, 8);
-    ctx.strokeStyle = '#5a6272';
-    ctx.strokeRect(-r + 6, -r + 6, r * 2 - 12, 8);
-  }
-  ctx.restore();
+  // A dark storm band across the top of the sky.
+  ctx.fillStyle = 'rgba(18, 18, 38, 0.55)';
+  ctx.fillRect(0, 0, W, H * 0.16);
 }
 
-function needle(ctx, r, angle) {
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(Math.sin(angle) * (r - 8), -Math.cos(angle) * (r - 8));
-  ctx.stroke();
+// ---- the whole chase frame ----
+
+export function drawChase(ctx, f, W, H, time, storm) {
+  const focal = (TUNE.focal * W) / 1280;
+  const cam = makeCamera(f);
+  drawSky(ctx, W, H, time, storm);
+  drawGround(ctx, cam, W, H, focal);
+  drawTownLamps(ctx, cam, W, H, focal);
+  drawRunway(ctx, cam, W, H, focal);
+  drawRings(ctx, f, cam, W, H, focal);
+  // The Kestrel, big in frame, low and centred; its shadow fades with height.
+  const heightAboveGround = Math.max(0, f.y - groundHeight(f.x, f.z));
+  const shadowAlpha = Math.max(0, 0.3 - heightAboveGround * 0.0012);
+  drawPlane(ctx, W / 2, H * 0.62, Math.min(W, H) * 0.34, f.roll, time, shadowAlpha);
+  // A light vignette pulls the eye to the plane and the next ring.
+  const vig = ctx.createRadialGradient(W / 2, H * 0.55, Math.min(W, H) * 0.42, W / 2, H * 0.55, Math.max(W, H) * 0.75);
+  vig.addColorStop(0, 'rgba(10, 8, 20, 0)');
+  vig.addColorStop(1, 'rgba(10, 8, 20, 0.28)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+  if (storm) drawRain(ctx, W, H, 37, time);
 }
 
-// ---- HUD -----------------------------------------------------------------
-
-export function drawHUD(ctx, camera, game) {
-  const { width, height } = camera;
-  const plane = game.plane;
-  const target = nextRing(game.course);
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  // Top-left instrument block: altitude, speed, heading, vertical speed.
-  ctx.fillStyle = 'rgba(10,14,22,0.62)';
-  roundRect(ctx, 14, 12, 264, 108, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 15px monospace';
-  ctx.fillText(`ALT  ${Math.round(plane.y)} m`, 30, 38);
-  ctx.fillText(`SPD  ${Math.round(plane.speed * 1.94)} kt`, 30, 62);
-  const hdg = Math.round(((-plane.heading * 180) / Math.PI % 360 + 360) % 360);
-  ctx.fillText(`HDG  ${String(hdg).padStart(3, '0')}°`, 30, 86);
-  const vs = plane.verticalSpeed;
-  ctx.fillStyle = vs < -6 ? '#ff8a7a' : '#9fd8ff';
-  ctx.fillText(`V/S  ${vs >= 0 ? '+' : ''}${vs.toFixed(1)} m/s`, 30, 110);
-  // Compass strip across the top.
-  ctx.fillStyle = 'rgba(10,14,22,0.62)';
-  ctx.fillRect(width / 2 - 150, 12, 300, 26);
-  ctx.fillStyle = '#e8f0f8';
-  ctx.font = 'bold 13px monospace';
-  ctx.textAlign = 'center';
-  const marks = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-  for (let i = 0; i < 8; i += 1) {
-    const deg = i * 45;
-    let diff = ((deg - hdg + 540) % 360) - 180;
-    if (Math.abs(diff) > 75) continue;
-    ctx.fillText(marks[i], width / 2 + diff * 2, 30);
-  }
-  ctx.fillStyle = '#ffd98a';
-  ctx.fillText('▲', width / 2, 12);
-  // Top-right: score, rings, timer.
-  ctx.fillStyle = 'rgba(10,14,22,0.62)';
-  roundRect(ctx, width - 264, 12, 250, 108, 10);
-  ctx.fill();
-  ctx.textAlign = 'right';
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 15px monospace';
-  ctx.fillText(`SCORE ${game.score}`, width - 26, 38);
-  ctx.fillStyle = '#e8f0f8';
-  const done = game.course.rings.filter((r) => r.passed).length;
-  ctx.fillText(`RINGS ${done}/${game.course.rings.length}`, width - 26, 62);
-  ctx.fillText(`TIME ${Math.max(0, Math.ceil(game.timeLeft))}s`, width - 26, 86);
-  ctx.fillStyle = game.combo > 1 ? '#ffd98a' : '#9fb2c8';
-  ctx.fillText(game.combo > 1 ? `COMBO x${game.combo}` : 'COMBO —', width - 26, 110);
-  // Bottom-left: fuel and throttle bars.
-  ctx.textAlign = 'left';
-  ctx.fillStyle = 'rgba(10,14,22,0.62)';
-  roundRect(ctx, 14, height - 64, 250, 50, 10);
-  ctx.fill();
-  bar(ctx, 26, height - 52, 226, 12, plane.fuel, plane.fuel < 0.2 ? '#ff5a4a' : '#4aff7a', 'FUEL');
-  bar(ctx, 26, height - 30, 226, 12, plane.throttle, '#ffd98a', 'THR');
-  // Next-ring distance and direction arrow.
-  if (target && game.mode === 'play') {
-    const dx = target.x - plane.x;
-    const dz = target.z - plane.z;
-    const bearing = Math.atan2(dx, -dz);
-    let rel = bearing - plane.heading;
-    while (rel > Math.PI) rel -= Math.PI * 2;
-    while (rel < -Math.PI) rel += Math.PI * 2;
-    const dist = Math.round(Math.hypot(dx, target.y - plane.y, dz));
-    ctx.fillStyle = 'rgba(10,14,22,0.62)';
-    roundRect(ctx, width / 2 - 110, height - 64, 220, 50, 10);
-    ctx.fill();
-    ctx.fillStyle = '#ffe9b0';
-    ctx.font = 'bold 15px monospace';
-    ctx.textAlign = 'center';
-    const arrow = rel > 0.5 ? '▶▶' : rel < -0.5 ? '◀◀' : rel > 0.15 ? '▶' : rel < -0.15 ? '◀' : '▲';
-    ctx.fillText(`${arrow}  RING ${target.index + 1}  ${dist} m`, width / 2, height - 32);
-  }
-  // Warnings, centre screen.
-  const warnings = [];
-  if (plane.fuel < 0.2) warnings.push('LOW FUEL');
-  if (plane.stalled) warnings.push('STALL — NOSE DOWN, THROTTLE UP');
-  if (plane.airborne && plane.y - heightAt(plane.x, plane.z) < 45) warnings.push('TERRAIN');
-  if (warnings.length > 0) {
-    ctx.fillStyle = Math.floor(performance.now() / 350) % 2 === 0 ? '#ff5a4a' : '#ffb0a0';
-    ctx.font = 'bold 22px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(warnings.join('   •   '), width / 2, height * 0.3);
-  }
-  // Transient message (ring scored, takeoff, touchdown).
-  if (game.message && game.messageT > 0) {
-    ctx.fillStyle = '#ffe9b0';
-    ctx.font = 'bold 26px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(game.message, width / 2, height * 0.42);
-  }
-}
-
-function bar(ctx, x, y, w, h, frac, colour, label) {
-  ctx.fillStyle = '#2b2f3a';
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = colour;
-  ctx.fillRect(x, y, w * Math.max(0, Math.min(1, frac)), h);
-  ctx.fillStyle = '#e8f0f8';
-  ctx.font = 'bold 10px monospace';
-  ctx.fillText(label, x + 4, y + h - 2);
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-// ---- screens ---------------------------------------------------------------
-
-function drawTitle(ctx, camera, game) {
-  const { width, height } = camera;
-  ctx.fillStyle = 'rgba(10,14,26,0.45)';
-  ctx.fillRect(0, 0, width, height);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 64px sans-serif';
-  ctx.fillText('SKYHOOK RUN', width / 2, 120);
-  ctx.fillStyle = '#f2ead8';
-  ctx.font = '20px sans-serif';
-  ctx.fillText('Fly the Kestrel through the rings. Bring her home to Runway 27.', width / 2, 156);
-  ctx.fillText('One valley, three missions — fuel is the clock.', width / 2, 184);
-  game.missionBoxes = [];
-  const bw = 300;
-  const bh = 164;
-  const gap = 24;
-  const x0 = width / 2 - (bw * 3 + gap * 2) / 2;
-  game.missionBoxes = game.missions.map((m, i) => {
-    const x = x0 + i * (bw + gap);
-    const y = 240;
-    const hover = game.hover && game.hover.x >= x && game.hover.x <= x + bw && game.hover.y >= y && game.hover.y <= y + bh;
-    ctx.fillStyle = hover ? 'rgba(255,217,138,0.92)' : 'rgba(20,26,40,0.85)';
-    roundRect(ctx, x, y, bw, bh, 12);
-    ctx.fill();
-    ctx.strokeStyle = '#ffd98a';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = hover ? '#1e2129' : '#ffd98a';
-    ctx.font = 'bold 24px sans-serif';
-    ctx.fillText(m.name, x + bw / 2, y + 44);
-    ctx.font = '15px sans-serif';
-    ctx.fillStyle = hover ? '#3a3f46' : '#f2ead8';
-    ctx.fillText(m.tag, x + bw / 2, y + 74);
-    ctx.font = '13px sans-serif';
-    ctx.fillText(m.blurb, x + bw / 2, y + 100, bw - 24);
-    ctx.fillStyle = hover ? '#3a3f46' : '#9fd8ff';
-    ctx.font = 'bold 13px monospace';
-    ctx.fillText(`${m.rings} RINGS · ${m.timeLimit}s · x${m.scoreMult} PTS`, x + bw / 2, y + 126);
-    ctx.fillStyle = hover ? '#3a3f46' : '#9fb2c8';
-    ctx.fillText(`press ${m.key}`, x + bw / 2, y + 150);
-    return { x, y, w: bw, h: bh, mission: m };
-  });
-  ctx.fillStyle = '#e8f0f8';
-  ctx.font = '15px monospace';
-  ctx.fillText('ARROWS / WASD pitch & roll · SHIFT / CTRL throttle · MOUSE steers too', width / 2, 450);
-  ctx.fillText('C camera · F flaps · M mute · P pause · R restart', width / 2, 476);
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 18px sans-serif';
-  ctx.fillText('Click a mission or press 1 / 2 / 3 to fly', width / 2, 530);
-  if (game.best > 0) {
-    ctx.fillStyle = '#9fd8ff';
-    ctx.font = '16px monospace';
-    ctx.fillText(`BEST SCORE ${game.best}`, width / 2, 566);
-  }
-}
-
-function drawEnd(ctx, camera, game) {
-  const { width, height } = camera;
-  ctx.fillStyle = 'rgba(10,14,26,0.55)';
-  ctx.fillRect(0, 0, width, height);
-  ctx.textAlign = 'center';
-  const landed = game.endKind === 'landed';
-  const title = landed ? 'WHEELS DOWN — SHE\'S HOME'
-    : game.endKind === 'fuel' ? 'OUT OF FUEL'
-    : game.endKind === 'time' ? 'OUT OF TIME' : 'CRASHED';
-  ctx.fillStyle = landed ? '#4aff7a' : '#ff8a7a';
-  ctx.font = 'bold 52px sans-serif';
-  ctx.fillText(title, width / 2, 180);
-  ctx.fillStyle = '#f2ead8';
-  ctx.font = '20px sans-serif';
-  ctx.fillText(game.endLine, width / 2, 222);
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 30px monospace';
-  ctx.fillText(`SCORE ${game.score}`, width / 2, 290);
-  ctx.fillStyle = '#e8f0f8';
-  ctx.font = '17px monospace';
-  const done = game.course.rings.filter((r) => r.passed).length;
-  ctx.fillText(`Rings ${done}/${game.course.rings.length}   ·   Best ring streak ${game.bestCombo}`, width / 2, 330);
-  ctx.fillText(`Time flown ${Math.round(game.flown)}s   ·   Fuel left ${Math.round(game.plane.fuel * 100)}%`, width / 2, 358);
-  if (game.score >= game.best && game.score > 0) {
-    ctx.fillStyle = '#4aff7a';
-    ctx.font = 'bold 18px sans-serif';
-    ctx.fillText('NEW BEST SCORE', width / 2, 396);
-  }
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 18px sans-serif';
-  ctx.fillText('Press R or click to fly again', width / 2, 450);
-}
-
-function drawPause(ctx, camera) {
-  const { width, height } = camera;
-  ctx.fillStyle = 'rgba(10,14,26,0.55)';
-  ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = '#ffd98a';
-  ctx.font = 'bold 44px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('PAUSED', width / 2, height / 2 - 10);
-  ctx.fillStyle = '#f2ead8';
-  ctx.font = '18px sans-serif';
-  ctx.fillText('P to resume · R to restart', width / 2, height / 2 + 28);
-}
-
-// ---- top-level draw ---------------------------------------------------------
-
-export function drawGame(ctx, game) {
-  const canvas = ctx.canvas;
-  const width = canvas.width;
-  const height = canvas.height;
-  const plane = game.plane;
-  const camera = makeCamera(plane, game.camera, width, height);
-  if (game.mode === SCREEN_TITLE) {
-    // The title flies over the valley at dawn: a slow orbit for the shot.
-    drawSky(ctx, camera, plane, game.mission, 0);
-    drawFarRidge(ctx, camera, plane);
-    drawTerrain(ctx, camera, plane);
-    drawRings(ctx, camera, game.course);
-    drawTitle(ctx, camera, game);
-    return;
-  }
-  drawSky(ctx, camera, plane, game.mission, 0);
-  drawFarRidge(ctx, camera, plane);
-  drawTerrain(ctx, camera, plane);
-  drawRings(ctx, camera, game.course);
-  if (game.camera !== 'cockpit') drawPlaneChase(ctx, camera, plane);
-  if (game.camera === 'cockpit') drawCockpit(ctx, camera, plane);
-  drawHUD(ctx, camera, game);
-  if (game.mode === SCREEN_OVER) drawEnd(ctx, camera, game);
-  if (game.mode === SCREEN_PAUSE) drawPause(ctx, camera);
+// The world from the cockpit: same valley, camera at the plane, no sprite.
+export function drawCockpitWorld(ctx, f, W, H, time, storm) {
+  const focal = (TUNE.focal * W) / 1280;
+  const cam = { x: f.x, y: f.y + 1.2, z: f.z, heading: f.heading };
+  drawSky(ctx, W, H, time, storm);
+  drawGround(ctx, cam, W, H, focal);
+  drawTownLamps(ctx, cam, W, H, focal);
+  drawRunway(ctx, cam, W, H, focal);
+  drawRings(ctx, f, cam, W, H, focal);
+  if (storm) drawRain(ctx, W, H, 37, time);
 }
