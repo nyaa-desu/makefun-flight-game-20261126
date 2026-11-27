@@ -16,7 +16,11 @@ const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
 // Start from an empty output directory so a second run can never inherit
 // a stale file from the first — the two runs must agree byte for byte.
-if (existsSync(out)) rmSync(out, { recursive: true, force: true });
+// Clear only the directory's CONTENTS, never the directory itself: in the
+// grader the output path is a mounted volume the scoring user cannot delete.
+if (existsSync(out)) {
+  for (const name of readdirSync(out)) rmSync(join(out, name), { recursive: true, force: true });
+}
 mkdirSync(out, { recursive: true });
 
 // The game: plain static files, loaded offline by a desktop browser.
