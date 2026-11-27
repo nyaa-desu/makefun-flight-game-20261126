@@ -1,56 +1,74 @@
-# Skyhook Run
+# Skyhook Run: fly the Kestrel through a river valley at dusk — 3 missions, 29 rings, gusting crosswind, fuel top-ups, stall model
 
 [![make.fun · best-flight-game-20261126-0057](https://make.fun/badge/best-flight-game-20261126-0057.svg)](https://make.fun/bounty/best-flight-game-20261126-0057?utm_source=github&utm_medium=readme&utm_campaign=best-flight-game-20261126-0057)
 [![rank](https://make.fun/badge/best-flight-game-20261126-0057/nyaa-desu/makefun-flight-game-20261126/rank.svg)](https://make.fun/bounty/best-flight-game-20261126-0057/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-flight-game-20261126-0057)
 [![reward](https://make.fun/badge/best-flight-game-20261126-0057/nyaa-desu/makefun-flight-game-20261126/reward.svg)](https://make.fun/bounty/best-flight-game-20261126-0057?utm_source=github&utm_medium=readme&utm_campaign=best-flight-game-20261126-0057)
 
-A bush-plane flight game for the make.fun **best-flight-game-20261126-0057**
-bounty. Fly the Kestrel through a ring course over a coastal valley at
-dusk — fields, a river, a little town, the sea to the east and mountains
-to the west — then bring her home to Runway 27 before the fuel runs out.
+A bush-plane flight game for the make.fun **best-flight-game-20261126-0057** bounty ($500, top 50 share). Fly the Kestrel — a cream-and-amber bush plane with a red tail — down Kestrel Valley at dusk, through gold rings over the Alder River, past the lamps of Milltown, and land it on Runway 27 before the fuel or the clock runs out.
 
-## How to play
+## The valley
 
-- **Pitch & roll:** arrow keys or WASD (or move the mouse to steer).
-- **Throttle:** Shift to open up, Ctrl to pull back.
-- **Camera:** C switches between the chase view and the cockpit, with its
-  lit instruments — attitude ball, altimeter, airspeed, fuel and throttle.
-- **Flaps:** F drops the flaps for a slower, steadier approach.
-- **M** mutes, **P** pauses, **R** restarts, **1 / 2 / 3** pick a mission.
+- **Kestrel Valley** — a river valley at dusk: indigo sky, a low sun, amber haze on the horizon, rolling fields and pine forest.
+- **Alder River** — winds the whole length of the valley; River Run's rings hang over the water.
+- **Milltown** — the lit town on the west bank, 46 lamps, just before the runway. Milltown Tower's controller is **Mara Voss**, on the radio all the way down.
+- **Runway 27** — a 420 m strip with edge lights, threshold bars and a centreline; land slow, level and gentle or the Kestrel is in the dirt.
 
-Fly through each gold ring to score — rings in a row build a combo, and
-every ring tops the tanks up a little. Fly past a ring and it is missed,
-the combo is lost. Finish the course, then land: slow, level and gentle
-on the strip. A hard touchdown anywhere else is a crash, and an empty
-tank ends the flight wherever you are.
+## The three missions — 29 rings in all
 
-## Missions
+| Mission | Rings | Time | Wind | Score | Character |
+| --- | --- | --- | --- | --- | --- |
+| **Ring Rally** | 12 | 300 s | calm | x1 | Weaves across the whole valley — the gentle way in |
+| **River Run** | 9 | 330 s | breeze, gusts 6 m/s | x1.4 | Rings over the Alder River, low and fast |
+| **Storm Dash** | 8 | 210 s | gusting, gusts 10 m/s | x2 | Wide, high rings in rain and crosswind |
 
-| Mission | Rings | Time | Wind | Points |
-| --- | --- | --- | --- | --- |
-| Ring Rally | 12 | 300 s | calm | x1 |
-| Island Hop | 9 | 330 s | breeze | x1.4 |
-| Storm Dash | 8 | 210 s | gusting crosswind | x2 |
+## How it flies
 
-Landing pays 500 points plus a bonus for fuel left and time to spare.
+- **Throttle** (Shift up, Ctrl down) sets the speed; **flaps** (F) lower the stall speed at the cost of drag.
+- **Banked turns** — the heading follows the bank, slower at speed; **pitch** climbs and dives.
+- **Stall model** — below 26 m/s (20 with flaps) the wing quits and the Kestrel sinks; a stall warning shouts on the HUD.
+- **Fuel** — burns with throttle; every ring tops the tanks up +4%. A ring also adds 100 points times the mission multiplier, plus 10% per combo step.
+- **Landing** — on the strip, under 38 m/s, level, descending under 4 m/s: +500, plus fuel and time bonuses and 50 per best combo. Anywhere else is a crash.
 
-## Run it
+## Views and sound
 
-Serve `game/` with any static HTTP server and open `game/index.html` in
-desktop Chrome. Everything is plain Canvas 2D and WebAudio oscillators —
-no libraries, no network requests, no files outside `game/`.
+- **Chase view** (default) and **cockpit view** (C): the cockpit has airspeed, altitude, fuel and throttle gauges, a compass strip and a yoke, all lit warm.
+- **Synthesized sound only** — an engine hum that follows the throttle, wind that rises with speed, a chime per ring, a thud on landing. No audio files.
+- **HUD** — mission and ring count, score, clock and fuel across the top; a side panel with the ground below, the nearest named places with distances, and Mara's radio log; controls and wind along the bottom.
 
-## Files
+## Controls
 
-- `game/index.html` — the page; `game/src/main.js` starts the game.
-- `game/src/config.js` — tuning, missions, palette.
-- `game/src/random.js` — the seeded generator and value noise.
-- `game/src/terrain.js` — the valley: heights, river, town, runway.
-- `game/src/course.js` — the ring course for each mission.
-- `game/src/flight.js` — the flight model: pitch, roll, lift, stall.
-- `game/src/input.js` — keyboard and mouse.
-- `game/src/audio.js` — synthesized engine, wind and chimes.
-- `game/src/render.js` — all canvas drawing: sky, terrain, cockpit, HUD.
-- `game/src/shots.js` — deterministic demo flights for the screenshots.
-- `main.ts` — hands the game in: copies `game/` and `screenshots/` to
-  `/output` and writes `dossier.json`.
+| Key | Action |
+| --- | --- |
+| ↑ / ↓ or W / S, mouse | Pitch |
+| ← / → or A / D, mouse | Bank |
+| Shift / Ctrl | Throttle up / down |
+| F | Flaps |
+| C | Chase / cockpit camera |
+| P | Pause |
+| M | Mute |
+| 1 / 2 / 3 | Pick a mission |
+| R | Fly again |
+| Enter | Take off |
+
+## Screenshots
+
+1. **1-cover.jpg** — the final ring: the Kestrel on the approach to Runway 27, fuel at 18%, combo x6, "FINAL RING!" on screen, the river, Milltown's lamps and the runway in frame.
+2. **2-storm.jpg** — Storm Dash in the rain, gusting crosswind, the next ring in the murk.
+3. **3-cockpit.jpg** — River Run from the cockpit, the Alder below, gauges lit.
+4. **4-end.jpg** — a perfect landing on Runway 27 with the full score breakdown.
+
+Each shot is a real render of the game running in a desktop browser: open `game/index.html?shot=cover` (or `storm`, `cockpit`, `end`) at 1280×720 with `?seed=1`.
+
+## Build
+
+Node 22, standard library only. The game is plain static files under `game/` — no libraries, no network requests. `main.ts` copies `game/` and `screenshots/` into the output directory and writes `dossier.json` with the vendored make.fun library:
+
+```sh
+MAKEFUN_OUTPUT_DIR=out node main.ts
+```
+
+Run it twice into two directories: the outputs are byte-identical.
+
+## License
+
+MIT — see [LICENSE](LICENSE). SPDX: `MIT`.
