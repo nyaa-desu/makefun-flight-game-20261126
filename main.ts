@@ -1,4 +1,4 @@
-// Skyhook Run v2 — the hand-in program (Node 22, standard library only).
+// Skyhook Run v3 — the hand-in program (Node 22, standard library only).
 // It gathers the entry — the game under game/, the screenshots under
 // screenshots/ — into the output directory and writes dossier.json, the
 // summary the judge reads, using the vendored make.fun library.
@@ -18,8 +18,17 @@ const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 // a stale file from the first — the two runs must agree byte for byte.
 // Clear only the directory's CONTENTS, never the directory itself: in the
 // grader the output path is a mounted volume the scoring user cannot delete.
+// Skip any entry the scoring user cannot delete instead of crashing: a
+// stale file left by an earlier grading phase under another user must not
+// fail the whole run (v3: try/catch around each removal).
 if (existsSync(out)) {
-  for (const name of readdirSync(out)) rmSync(join(out, name), { recursive: true, force: true });
+  for (const name of readdirSync(out)) {
+    try {
+      rmSync(join(out, name), { recursive: true, force: true });
+    } catch {
+      continue;
+    }
+  }
 }
 mkdirSync(out, { recursive: true });
 
@@ -45,6 +54,6 @@ const dossier = buildDossier(out, {
 writeFileSync(join(out, 'dossier.json'), dossier);
 
 const shots = readdirSync(join(out, 'screenshots')).sort();
-console.log(`Skyhook Run v2 -> ${out}`);
+console.log(`Skyhook Run v3 -> ${out}`);
 console.log(`screenshots: ${shots.join(', ')}`);
 console.log(`dossier.json: ${dossier.byteLength} bytes`);
